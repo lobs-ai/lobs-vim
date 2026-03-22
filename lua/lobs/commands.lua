@@ -45,13 +45,16 @@ function M.register()
 
   cmd("LobsStatus", function()
     local client = require("lobs").client()
-    local status = client:status()
+    local s = client:status()
     local parts = {
-      string.format("State: %s", status.state),
-      string.format("Server: %s", status.server),
+      string.format("State: %s", s.state),
+      string.format("Server: %s", s.server),
     }
-    if status.session then
-      table.insert(parts, string.format("Session: %s", status.session))
+    if s.session then
+      table.insert(parts, string.format("Session: %s", s.session))
+    end
+    if s.auth ~= "none" then
+      table.insert(parts, "Auth: " .. s.auth)
     end
     vim.notify("Lobs: " .. table.concat(parts, " | "), vim.log.levels.INFO)
   end, { desc = "Show Lobs connection status" })
@@ -59,7 +62,7 @@ function M.register()
   cmd("LobsConnect", function()
     require("lobs").client():connect(function(err)
       if err then
-        vim.notify("Lobs: failed to connect — " .. err, vim.log.levels.ERROR)
+        vim.notify("Lobs: " .. err, vim.log.levels.ERROR)
       end
     end)
   end, { desc = "Connect to Lobs server" })
@@ -68,6 +71,40 @@ function M.register()
     require("lobs").client():disconnect()
     vim.notify("Lobs: disconnected", vim.log.levels.INFO)
   end, { desc = "Disconnect from Lobs server" })
+
+  cmd("LobsAuth", function(args)
+    local subcmd = args.args
+    if subcmd == "clear" then
+      require("lobs.auth").clear_cache()
+    elseif subcmd == "status" then
+      local config = require("lobs").config
+      if not config.cloudflare.enabled then
+        vim.notify("Lobs: Cloudflare Access not enabled", vim.log.levels.INFO)
+        return
+      end
+      require("lobs.auth").get_token(config, function(token, err)
+        if err then
+          vim.notify("Lobs: Auth error — " .. err, vim.log.levels.ERROR)
+        elseif token then
+          vim.notify("Lobs: Auth token valid", vim.log.levels.INFO)
+        else
+          vim.notify("Lobs: No auth token", vim.log.levels.WARN)
+        end
+      end)
+    else
+      -- Default: force re-auth
+      require("lobs.auth").clear_cache()
+      require("lobs").client():connect(function(err)
+        if err then
+          vim.notify("Lobs: " .. err, vim.log.levels.ERROR)
+        end
+      end)
+    end
+  end, {
+    nargs = "?",
+    complete = function() return { "clear", "status" } end,
+    desc = "Manage Lobs auth (clear | status | <default: re-login>)",
+  })
 end
 
 return M

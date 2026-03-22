@@ -1,36 +1,71 @@
-# lobs-vim
+# lobs.nvim
 
-Neovim plugin for [Lobs](https://github.com/lobs-ai/lobs-core) — a personal AI agent that can edit your code, run commands, and search the web, all from a chat sidebar in Neovim.
+AI coding agent for Neovim. Connects to [lobs-core](https://github.com/lobs-ai/lobs-core) — tools run locally in your editor, reasoning runs on the server.
 
-Think Cursor's agent mode, but backed by your own agent infrastructure.
+## Install
 
-## Features
+**LazyVim / lazy.nvim:**
 
-- **Chat sidebar** — talk to Lobs, get streamed responses with markdown rendering
-- **Full agent capabilities** — Lobs can read/write/edit files on your machine, run shell commands, search the web, and use memory
-- **Code context** — automatically sends current file, cursor position, and selection as context
-- **Diff application** — review and accept/reject file changes the agent proposes
-- **Project-aware** — sessions are scoped to your project root
+```lua
+return {
+  "lobs-ai/lobs-vim",
+  opts = {
+    server = "wss://nexus.lobslab.com",
+  },
+}
+```
+
+That's it. On first connect it'll open your browser for Cloudflare Access login (one-time).
+
+### Local development (no auth needed)
+
+```lua
+return {
+  "lobs-ai/lobs-vim",
+  opts = {
+    server = "ws://localhost:9420",
+  },
+}
+```
 
 ## Requirements
 
-- Neovim >= 0.10
-- [lazy.nvim](https://github.com/folke/lazy.nvim) (recommended)
-- A running [lobs-core](https://github.com/lobs-ai/lobs-core) instance
-- [nui.nvim](https://github.com/MunifTanjim/nui.nvim) (UI components)
+- Neovim ≥ 0.10
+- [websocat](https://github.com/nickel-lang/websocat) — `brew install websocat`
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/) — `brew install cloudflared` (only for remote servers behind CF Access)
 
-## Installation
+## Configuration
+
+All options with defaults:
 
 ```lua
--- lazy.nvim
-{
+return {
   "lobs-ai/lobs-vim",
-  dependencies = {
-    "MunifTanjim/nui.nvim",
-  },
   opts = {
-    server = "ws://your-lobs-server:9420",
-    token = "your-auth-token",
+    -- Server URL
+    server = "ws://localhost:9420",
+
+    -- Cloudflare Access (auto-detected for *.lobslab.com)
+    cloudflare = {
+      enabled = nil,  -- nil = auto-detect, true/false = override
+      url = nil,      -- override the auth URL
+    },
+
+    -- UI
+    sidebar_width = 60,
+    sidebar_position = "right",  -- "left" or "right"
+
+    -- Context
+    send_current_file = true,
+    send_selection = true,
+    max_context_lines = 500,
+
+    -- Keymaps (false to disable)
+    keymaps = {
+      toggle = "<leader>aa",
+      new_session = "<leader>ac",
+      ask_selection = "<leader>as",
+    },
   },
 }
 ```
@@ -39,23 +74,22 @@ Think Cursor's agent mode, but backed by your own agent infrastructure.
 
 | Command | Description |
 |---------|-------------|
-| `:LobsToggle` | Toggle the chat sidebar |
-| `:LobsChat` | Open sidebar and focus input |
-| `:LobsSend` | Send current input |
-| `:LobsAsk` | Ask about selected code (visual mode) |
-| `:LobsNewSession` | Start a new chat session |
-| `:LobsAcceptAll` | Accept all pending file changes |
+| `:LobsToggle` / `<leader>aa` | Open/close chat sidebar |
+| `:LobsChat` | Open chat and focus input |
+| `:LobsAsk` / `<leader>as` (visual) | Ask about selected code |
+| `:LobsNewSession` / `<leader>ac` | Start fresh conversation |
+| `:LobsAcceptAll` | Accept all proposed changes |
+| `:LobsRejectAll` | Reject all proposed changes |
+| `:LobsConnect` | Manually connect to server |
+| `:LobsDisconnect` | Disconnect |
+| `:LobsStatus` | Show connection info |
+| `:LobsAuth` | Re-authenticate (CF Access) |
+| `:LobsAuth clear` | Clear cached auth token |
+| `:LobsAuth status` | Check if token is valid |
 
-## Keybindings
+## How it works
 
-Default keybindings (customizable):
-
-| Key | Mode | Action |
-|-----|------|--------|
-| `<leader>aa` | n | Toggle sidebar |
-| `<leader>ac` | n | New chat session |
-| `<leader>as` | v | Ask about selection |
-| `<CR>` | n (in input) | Send message |
+lobs-vim opens a WebSocket to lobs-core. When the AI agent needs to read files, run commands, or edit code, those tools execute **locally in your Neovim** — not on the server. The server handles LLM reasoning; your editor handles execution. This means the agent works with your actual project files, respects your local environment, and changes appear in your editor in real-time.
 
 ## License
 
