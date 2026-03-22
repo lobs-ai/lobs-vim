@@ -105,11 +105,11 @@ function M.register()
     for _, s in ipairs(all) do
       table.insert(items, s)
       local project_name = vim.fn.fnamemodify(s.project_root, ":t")
+      local title = s.title or "Untitled"
       local label = string.format(
-        "%s  %s  %s  (%s)",
-        s.session_key,
+        "%s  [%s]  (%s)",
+        title,
         project_name,
-        s.title or "",
         time_ago(s.last_used)
       )
       table.insert(labels, label)

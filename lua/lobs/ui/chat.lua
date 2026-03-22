@@ -339,9 +339,13 @@ function M:_send_to_agent(content, context)
     on_stall = function(elapsed)
       -- Show stall indicator without clearing the stream
       if self._streaming and self._messages[msg_idx] then
-        -- Append a stall notice (will be replaced by next text delta)
         self:_render()
       end
+    end,
+
+    on_title_update = function(title)
+      -- Re-render to show updated title in header
+      self:_render()
     end,
   })
 end
@@ -371,7 +375,8 @@ function M:_render()
   -- Session info header
   local client = require("lobs").client()
   if client.session_key then
-    local session_label = "📎 " .. client.session_key
+    local title = client._session_title or client.session_key
+    local session_label = "📎 " .. title
     if client._resumed_session then
       session_label = session_label .. " (resumed)"
     end
@@ -463,7 +468,7 @@ function M:_render()
   end
 
   -- Scroll to bottom
-  if self.split and vim.api.nvim_win_is_valid(self.split.winid) then
+  if self.split and self.split.winid and vim.api.nvim_win_is_valid(self.split.winid) then
     local line_count = vim.api.nvim_buf_line_count(self.chat_buf)
     vim.api.nvim_win_set_cursor(self.split.winid, { line_count, 0 })
   end
