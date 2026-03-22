@@ -168,7 +168,7 @@ function M.build_project_context()
   -- README.md (check common casings)
   local readme_names = { "README.md", "readme.md", "Readme.md", "README.rst", "README.txt", "README" }
   for _, name in ipairs(readme_names) do
-    local content = read_file(root .. "/" .. name, 200)
+    local content = read_file(root .. "/" .. name, 1000)
     if content then
       table.insert(parts, "### " .. name)
       table.insert(parts, content)
@@ -180,7 +180,7 @@ function M.build_project_context()
   -- AGENTS.md (common casings)
   local agents_names = { "AGENTS.md", "agents.md", "Agents.md", ".agents.md", "CLAUDE.md", "claude.md", "COPILOT.md" }
   for _, name in ipairs(agents_names) do
-    local content = read_file(root .. "/" .. name, 200)
+    local content = read_file(root .. "/" .. name, 1000)
     if content then
       table.insert(parts, "### " .. name)
       table.insert(parts, content)

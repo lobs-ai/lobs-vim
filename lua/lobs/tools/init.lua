@@ -153,29 +153,75 @@ M._handlers.edit = function(self, input, callback)
   end
 end
 
--- exec tool
+-- exec tool (with approval guard)
 M._handlers.exec = function(self, input, callback)
   local cmd = input.command
   local cwd = input.cwd and self:_resolve_path(input.cwd) or self._project_root
   local timeout = input.timeout or 30000
+  local guard = require("lobs.exec_guard")
 
-  vim.system(
-    { "bash", "-c", cmd },
-    {
-      text = true,
-      cwd = cwd,
-      timeout = timeout,
-    },
-    function(result)
-      vim.schedule(function()
-        local output = (result.stdout or "") .. (result.stderr or "")
-        if result.code ~= 0 then
-          output = output .. "\n[exit code: " .. (result.code or "?") .. "]"
+  local function run_command()
+    vim.system(
+      { "bash", "-c", cmd },
+      {
+        text = true,
+        cwd = cwd,
+        timeout = timeout,
+      },
+      function(result)
+        vim.schedule(function()
+          local output = (result.stdout or "") .. (result.stderr or "")
+          if result.code ~= 0 then
+            output = output .. "\n[exit code: " .. (result.code or "?") .. "]"
+          end
+          callback(output, result.code ~= 0)
+        end)
+      end
+    )
+  end
+
+  local status, unapproved = guard.check(cmd)
+
+  if status == "safe" then
+    run_command()
+    return
+  end
+
+  if status == "blocked" then
+    callback("Command blocked: `" .. unapproved[1] .. "` is never allowed", true)
+    return
+  end
+
+  -- needs_approval — prompt the user
+  local cmds_str = table.concat(unapproved, ", ")
+
+  vim.schedule(function()
+    vim.ui.select(
+      {
+        "Allow once",
+        "Allow for session (" .. cmds_str .. ")",
+        "Deny",
+      },
+      {
+        prompt = "⚠️  Exec approval needed [" .. cmds_str .. "]:\n" .. cmd .. "\n",
+      },
+      function(_, idx)
+        if idx == 1 then
+          -- Allow once — just run
+          run_command()
+        elseif idx == 2 then
+          -- Allow for session
+          for _, c in ipairs(unapproved) do
+            guard.approve_session(c)
+          end
+          run_command()
+        else
+          -- Denied or cancelled
+          callback("Command denied by user: " .. cmds_str, true)
         end
-        callback(output, result.code ~= 0)
-      end)
-    end
-  )
+      end
+    )
+  end)
 end
 
 -- ls tool

@@ -145,6 +145,9 @@ function M.register()
           chat._current_stream = ""
           chat._loading_history = true
 
+          -- Reset exec approvals for the new session
+          require("lobs.exec_guard").clear_session_approvals()
+
           -- Open the chat sidebar (if not already open) so user sees the session
           chat:open()
           chat:_render()
