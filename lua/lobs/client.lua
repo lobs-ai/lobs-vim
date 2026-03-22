@@ -1,5 +1,6 @@
 -- lobs.nvim — WebSocket client for lobs-core
--- Connects via websocat, handles Cloudflare Access auth transparently.
+-- Connects via websocat. For Cloudflare Access servers, uses cloudflared
+-- as a local TCP proxy that handles auth transparently.
 local M = {}
 M.__index = M
 
@@ -11,9 +12,7 @@ local auth = require("lobs.auth")
 ---@field session_key string|nil
 ---@field _connected boolean
 ---@field _ws_job vim.SystemObj|nil
----@field _pending table<string, {resolve: function, reject: function, timer: uv_timer_t}>
 ---@field _handlers table
----@field _cf_token string|nil
 
 --- Create a new client
 ---@param config table
@@ -25,17 +24,25 @@ function M.new(config)
   self._connected = false
   self._connecting = false
   self._ws_job = nil
-  self._pending = {}
   self._handlers = {}
-  self._ws_url = config.server:gsub("/+$", "") .. "/api/vim/ws"
   self._tool_executor = require("lobs.tools").new()
   self._reconnect_timer = nil
   self._reconnect_attempts = 0
   self._max_reconnect_attempts = 5
   self._outgoing_queue = {}
-  self._cf_token = nil
   self._intentional_disconnect = false
   return self
+end
+
+--- Build the WebSocket URL. If using CF proxy, connects to localhost proxy.
+---@param proxy_port number|nil
+---@return string
+function M:_build_ws_url(proxy_port)
+  if proxy_port then
+    -- Connect through the local cloudflared proxy (plain ws, proxy handles TLS+auth)
+    return "ws://localhost:" .. proxy_port .. "/api/vim/ws"
+  end
+  return self.config.server:gsub("/+$", "") .. "/api/vim/ws"
 end
 
 --- Connect to lobs-core via WebSocket
@@ -53,23 +60,22 @@ function M:connect(callback)
   self._connecting = true
   self._intentional_disconnect = false
 
-  -- Get CF Access token first (no-op if not using Cloudflare)
-  auth.get_token(self.config, function(token, err)
+  -- Ensure CF proxy is running (no-op if not using Cloudflare)
+  auth.ensure_proxy(self.config, function(proxy_port, err)
     if err then
       self._connecting = false
       vim.notify("Lobs: " .. err, vim.log.levels.ERROR)
       if callback then callback(err) end
       return
     end
-    self._cf_token = token
-    self:_connect_ws(callback)
+    self:_connect_ws(proxy_port, callback)
   end)
 end
 
---- Internal: establish WebSocket connection (after auth)
+--- Internal: establish WebSocket connection
+---@param proxy_port number|nil Local cloudflared proxy port, or nil for direct
 ---@param callback function|nil
-function M:_connect_ws(callback)
-  -- Check websocat is available
+function M:_connect_ws(proxy_port, callback)
   if vim.fn.executable("websocat") ~= 1 then
     self._connecting = false
     local err = "websocat not found. Install: brew install websocat"
@@ -78,13 +84,8 @@ function M:_connect_ws(callback)
     return
   end
 
-  -- Build websocat command
-  local cmd = { "websocat", "--text" }
-  if self._cf_token then
-    table.insert(cmd, "-H")
-    table.insert(cmd, "Cookie: CF_Authorization=" .. self._cf_token)
-  end
-  table.insert(cmd, self._ws_url)
+  local ws_url = self:_build_ws_url(proxy_port)
+  local cmd = { "websocat", "--text", ws_url }
 
   local buf = ""
   local got_message = false
@@ -104,7 +105,6 @@ function M:_connect_ws(callback)
             local line = buf:sub(1, nl - 1)
             buf = buf:sub(nl + 1)
             if line ~= "" then
-              -- First message confirms we're actually connected
               if not got_message then
                 got_message = true
                 self._connected = true
@@ -119,21 +119,15 @@ function M:_connect_ws(callback)
       stderr = function(_, data)
         if data and data ~= "" then
           vim.schedule(function()
-            -- Capture stderr for connection errors
             local trimmed = data:gsub("%s+$", "")
-            if trimmed:match("302") or trimmed:match("[Rr]edirect") then
-              vim.notify("Lobs: Server requires auth — run :LobsAuth", vim.log.levels.ERROR)
-            elseif trimmed:match("[Ee]rror") or trimmed:match("WebSocketError") then
-              -- Only show if we haven't connected yet (not mid-session noise)
-              if not self._connected then
-                vim.notify("Lobs: " .. trimmed, vim.log.levels.ERROR)
-              end
+            if trimmed ~= "" and not self._connected then
+              vim.notify("Lobs WS: " .. trimmed, vim.log.levels.WARN)
             end
           end)
         end
       end,
     },
-    function(result)
+    function(_result)
       vim.schedule(function()
         local was_connected = self._connected
         self._connected = false
@@ -141,20 +135,12 @@ function M:_connect_ws(callback)
         self._ws_job = nil
 
         if self._intentional_disconnect then
-          return -- don't reconnect
+          return
         end
 
-        -- If we never got a message, the connection failed entirely
         if not was_connected then
-          -- Check if it's an auth issue
-          local stderr = result.stderr or ""
-          if stderr:match("302") or stderr:match("[Rr]edirect") then
-            -- Auth failed — clear token and prompt
-            auth.clear_cache()
-            self._cf_token = nil
-            vim.notify("Lobs: Auth required. Run :LobsConnect to authenticate.", vim.log.levels.WARN)
-            return -- don't auto-reconnect on auth failure
-          end
+          -- Never connected — might be auth issue
+          vim.notify("Lobs: Connection failed", vim.log.levels.ERROR)
         end
 
         self:_on_disconnect()
@@ -162,8 +148,7 @@ function M:_connect_ws(callback)
     end
   )
 
-  -- Send session.open immediately — if websocat connected, it'll go through.
-  -- If websocat fails, the message just gets lost (process dies).
+  -- Send session.open immediately
   self:_send_raw(protocol.session_open({
     projectRoot = require("lobs.context").get_project_root(),
     sessionKey = self.session_key,
@@ -198,7 +183,7 @@ end
 --- Send a chat message
 ---@param content string
 ---@param context table
----@param handlers table { on_text, on_tool_start, on_tool_result, on_done, on_error, on_thinking }
+---@param handlers table
 function M:send_message(content, context, handlers)
   self._handlers = handlers
 
@@ -263,11 +248,6 @@ function M:_on_message(raw)
 
   elseif t == "error" then
     local errmsg = msg.message or "server error"
-    if errmsg:match("403") or errmsg:match("Unauthorized") then
-      auth.clear_cache()
-      self._cf_token = nil
-      vim.notify("Lobs: Auth expired. Run :LobsConnect", vim.log.levels.WARN)
-    end
     if self._handlers.on_error then
       self._handlers.on_error(errmsg)
     end
@@ -315,14 +295,15 @@ end
 --- Handle WebSocket disconnection
 function M:_on_disconnect()
   if self._reconnect_attempts >= self._max_reconnect_attempts then
-    vim.notify("Lobs: disconnected — run :LobsConnect to retry", vim.log.levels.ERROR)
+    vim.notify("Lobs: gave up reconnecting — :LobsConnect to retry", vim.log.levels.ERROR)
+    self._reconnect_attempts = 0
     return
   end
 
   self._reconnect_attempts = self._reconnect_attempts + 1
   local delay = math.min(1000 * math.pow(2, self._reconnect_attempts - 1), 30000)
 
-  vim.notify(string.format("Lobs: reconnecting in %ds...", delay / 1000), vim.log.levels.WARN)
+  vim.notify(string.format("Lobs: reconnecting in %ds...", math.floor(delay / 1000)), vim.log.levels.WARN)
 
   self._reconnect_timer = vim.defer_fn(function()
     self._reconnect_timer = nil
@@ -336,7 +317,6 @@ function M:disconnect()
 
   -- Cancel pending reconnect
   if self._reconnect_timer then
-    -- vim.defer_fn returns a timer; stop it
     pcall(function()
       if type(self._reconnect_timer) == "userdata" then
         self._reconnect_timer:stop()
@@ -350,9 +330,13 @@ function M:disconnect()
     self._ws_job = nil
   end
 
+  -- Stop the auth proxy too
+  auth.stop_proxy()
+
   self._connected = false
   self._connecting = false
   self._reconnect_attempts = 0
+  vim.notify("Lobs: disconnected", vim.log.levels.INFO)
 end
 
 --- Get connection status
@@ -365,9 +349,9 @@ function M:status()
   end
   return {
     state = state,
-    server = self._ws_url,
+    server = self.config.server,
     session = self.session_key,
-    auth = self._cf_token and "authenticated" or "none",
+    auth = auth.is_authenticated() and "proxy running" or "none",
   }
 end
 

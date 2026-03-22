@@ -78,19 +78,17 @@ function M.register()
       require("lobs.auth").clear_cache()
     elseif subcmd == "status" then
       local config = require("lobs").config
-      if not config.cloudflare.enabled then
+      local cf = config.cloudflare or {}
+      if not cf.enabled then
         vim.notify("Lobs: Cloudflare Access not enabled", vim.log.levels.INFO)
         return
       end
-      require("lobs.auth").get_token(config, function(token, err)
-        if err then
-          vim.notify("Lobs: Auth error — " .. err, vim.log.levels.ERROR)
-        elseif token then
-          vim.notify("Lobs: Auth token valid", vim.log.levels.INFO)
-        else
-          vim.notify("Lobs: No auth token", vim.log.levels.WARN)
-        end
-      end)
+      local authed = require("lobs.auth").is_authenticated()
+      if authed then
+        vim.notify("Lobs: Auth proxy running", vim.log.levels.INFO)
+      else
+        vim.notify("Lobs: Not authenticated — run :LobsConnect", vim.log.levels.WARN)
+      end
     else
       -- Default: force re-auth
       require("lobs.auth").clear_cache()
