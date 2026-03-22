@@ -1,11 +1,18 @@
 -- lobs.nvim — Cloudflare Access authentication
--- Handles the CF Access JWT flow: login, token caching, and refresh.
+-- Uses `cloudflared` CLI for browser-based login. No secrets in config.
+--
+-- Flow:
+--   1. First connect: `cloudflared access login <url>` opens browser
+--   2. User authenticates via email code (one click)
+--   3. JWT cached locally by cloudflared + our own cache with expiry tracking
+--   4. Subsequent connects use cached token until expiry (~24h)
+--   5. On expiry, browser opens again automatically
 local M = {}
 
 local CACHE_DIR = vim.fn.stdpath("cache") .. "/lobs"
 local TOKEN_FILE = CACHE_DIR .. "/cf_token"
 
---- Get the Access URL from config (HTTP version of the server URL)
+--- Get the Access URL from config (HTTPS version of the server URL)
 ---@param config table
 ---@return string
 local function get_access_url(config)
@@ -19,6 +26,13 @@ local function get_access_url(config)
   return url:match("^https?://[^/]+") or url
 end
 
+--- Check if a string looks like a JWT (three base64url-encoded segments)
+---@param s string
+---@return boolean
+local function looks_like_jwt(s)
+  return s:match("^[A-Za-z0-9_%-]+%.[A-Za-z0-9_%-]+%.[A-Za-z0-9_%-]+$") ~= nil
+end
+
 --- Read cached token from disk
 ---@return string|nil token, number|nil expiry_ts
 local function read_cached_token()
@@ -30,11 +44,10 @@ local function read_cached_token()
   -- Format: <token>\n<expiry_timestamp>
   local token, expiry_str = content:match("^(.+)\n(%d+)$")
   if not token then
-    -- Old format: just the token, no expiry
     token = content:gsub("%s+$", "")
-    return token, nil
   end
-  return token, tonumber(expiry_str)
+  if not looks_like_jwt(token) then return nil, nil end
+  return token, expiry_str and tonumber(expiry_str) or nil
 end
 
 --- Write token to cache
@@ -50,7 +63,6 @@ local function write_cached_token(token, expiry_ts)
     f:write(token)
   end
   f:close()
-  -- Restrictive permissions — token is sensitive
   vim.fn.setfperm(TOKEN_FILE, "rw-------")
 end
 
@@ -61,14 +73,12 @@ local function jwt_expiry(token)
   local parts = vim.split(token, ".", { plain = true })
   if #parts < 2 then return nil end
 
-  -- Base64url decode the payload
   local payload_b64 = parts[2]
-  -- Add padding
+  -- Base64url → base64: add padding, swap chars
   local pad = 4 - (#payload_b64 % 4)
   if pad < 4 then
     payload_b64 = payload_b64 .. string.rep("=", pad)
   end
-  -- Convert base64url to base64
   payload_b64 = payload_b64:gsub("-", "+"):gsub("_", "/")
 
   local ok, decoded = pcall(vim.base64.decode, payload_b64)
@@ -86,74 +96,65 @@ end
 ---@return boolean
 local function is_token_valid(token, expiry_ts)
   if not token or token == "" then return false end
-
-  -- If we have an explicit expiry, use it
   local exp = expiry_ts or jwt_expiry(token)
-  if not exp then
-    -- Can't determine expiry — assume valid but it might fail
-    return true
-  end
+  if not exp then return true end -- can't determine expiry, try it
+  return exp > (os.time() + 60) -- 60s buffer
+end
 
-  -- Allow 60s buffer before expiry
-  return exp > (os.time() + 60)
+--- Extract a clean token from cloudflared output
+---@param stdout string
+---@return string|nil
+local function extract_token(stdout)
+  if not stdout then return nil end
+  -- cloudflared may output multiple lines; the token is the JWT line
+  for line in stdout:gmatch("[^\r\n]+") do
+    local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if looks_like_jwt(trimmed) then
+      return trimmed
+    end
+  end
+  return nil
 end
 
 --- Get a valid CF Access token, refreshing if needed.
---- This is async — calls callback(token, err) when done.
+--- Async — calls callback(token, err) when done.
 ---@param config table
 ---@param callback fun(token: string|nil, err: string|nil)
 function M.get_token(config, callback)
   local cf = config.cloudflare or {}
   if not cf.enabled then
-    callback(nil, nil) -- No auth needed
+    callback(nil, nil)
     return
   end
 
-  -- Check cached token
+  -- Check our own cache first
   local token, expiry = read_cached_token()
   if token and is_token_valid(token, expiry) then
     callback(token, nil)
     return
   end
 
-  -- Try to get a fresh token via cloudflared
   local url = get_access_url(config)
-  M._fetch_token(url, function(new_token, err)
-    if err then
-      callback(nil, err)
-      return
-    end
-    if new_token then
-      local new_expiry = jwt_expiry(new_token)
-      write_cached_token(new_token, new_expiry)
-      callback(new_token, nil)
-    else
-      callback(nil, "No token returned")
-    end
-  end)
-end
 
---- Fetch a token from cloudflared access
----@param url string
----@param callback fun(token: string|nil, err: string|nil)
-function M._fetch_token(url, callback)
   -- Check if cloudflared is available
   if vim.fn.executable("cloudflared") ~= 1 then
-    callback(nil, "cloudflared not found. Install it: brew install cloudflared")
+    callback(nil, "cloudflared not found. Install: brew install cloudflared")
     return
   end
 
-  -- Try non-interactive token fetch first (works if already logged in)
+  -- Try non-interactive token fetch (works if previously logged in)
   vim.system(
     { "cloudflared", "access", "token", url },
     { text = true },
     function(result)
       vim.schedule(function()
-        if result.code == 0 and result.stdout and result.stdout:match("%S") then
-          local token = result.stdout:gsub("%s+$", "")
-          callback(token, nil)
+        local new_token = extract_token(result.stdout or "")
+        if new_token then
+          local new_expiry = jwt_expiry(new_token)
+          write_cached_token(new_token, new_expiry)
+          callback(new_token, nil)
         else
-          -- Need interactive login — notify the user
+          -- No cached cloudflared token — need interactive login
           M._interactive_login(url, callback)
         end
       end)
@@ -165,31 +166,33 @@ end
 ---@param url string
 ---@param callback fun(token: string|nil, err: string|nil)
 function M._interactive_login(url, callback)
-  vim.notify(
-    "Lobs: Opening browser for Cloudflare Access login...",
-    vim.log.levels.INFO
-  )
+  vim.notify("Lobs: Opening browser for authentication...", vim.log.levels.INFO)
 
   vim.system(
-    { "cloudflared", "access", "login", url },
+    { "cloudflared", "access", "login", "--auto-close", url },
     { text = true },
     function(result)
       vim.schedule(function()
         if result.code ~= 0 then
-          callback(nil, "Cloudflare Access login failed. Run manually: cloudflared access login " .. url)
+          local err = (result.stderr or ""):gsub("%s+$", "")
+          if err == "" then err = "login failed" end
+          callback(nil, "Auth failed: " .. err .. "\nManual fallback: cloudflared access login " .. url)
           return
         end
 
-        -- Now fetch the token (login should have cached creds)
+        -- Login succeeded — fetch the token
         vim.system(
           { "cloudflared", "access", "token", url },
           { text = true },
           function(token_result)
             vim.schedule(function()
-              if token_result.code == 0 and token_result.stdout and token_result.stdout:match("%S") then
-                callback(token_result.stdout:gsub("%s+$", ""), nil)
+              local new_token = extract_token(token_result.stdout or "")
+              if new_token then
+                local new_expiry = jwt_expiry(new_token)
+                write_cached_token(new_token, new_expiry)
+                callback(new_token, nil)
               else
-                callback(nil, "Failed to get token after login")
+                callback(nil, "Login succeeded but couldn't retrieve token")
               end
             end)
           end
@@ -199,10 +202,10 @@ function M._interactive_login(url, callback)
   )
 end
 
---- Clear cached token (for manual re-auth)
+--- Clear cached token (force re-auth on next connect)
 function M.clear_cache()
   os.remove(TOKEN_FILE)
-  vim.notify("Lobs: Cleared cached auth token", vim.log.levels.INFO)
+  vim.notify("Lobs: Auth cache cleared — will re-authenticate on next connect", vim.log.levels.INFO)
 end
 
 return M

@@ -15,40 +15,26 @@ return {
 }
 ```
 
-That's it. On first connect it'll open your browser for Cloudflare Access login (one-time).
-
-### Local development (no auth needed)
-
-```lua
-return {
-  url = "git@github.com:lobs-ai/lobs-vim",
-  opts = {
-    server = "ws://localhost:9420",
-  },
-}
-```
+First time you connect, your browser opens for a quick email auth. After that it just works (token cached ~24h).
 
 ## Requirements
 
 - Neovim ≥ 0.10
-- [websocat](https://github.com/nickel-lang/websocat) — `brew install websocat`
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/) — `brew install cloudflared` (only for remote servers behind CF Access)
+- [websocat](https://github.com/vi/websocat) — `brew install websocat`
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/) — `brew install cloudflared` (for remote servers behind CF Access)
 
 ## Configuration
-
-All options with defaults:
 
 ```lua
 return {
   url = "git@github.com:lobs-ai/lobs-vim",
   opts = {
     -- Server URL
-    server = "ws://localhost:9420",
+    server = "wss://nexus.lobslab.com",
 
-    -- Cloudflare Access (auto-detected for *.lobslab.com)
+    -- Cloudflare Access (auto-detected for *.lobslab.com, no secrets needed)
     cloudflare = {
-      enabled = nil,  -- nil = auto-detect, true/false = override
-      url = nil,      -- override the auth URL
+      enabled = nil,  -- nil = auto-detect from URL
     },
 
     -- UI
@@ -78,18 +64,24 @@ return {
 | `:LobsChat` | Open chat and focus input |
 | `:LobsAsk` / `<leader>as` (visual) | Ask about selected code |
 | `:LobsNewSession` / `<leader>ac` | Start fresh conversation |
-| `:LobsAcceptAll` | Accept all proposed changes |
-| `:LobsRejectAll` | Reject all proposed changes |
-| `:LobsConnect` | Manually connect to server |
+| `:LobsConnect` | Connect to server |
 | `:LobsDisconnect` | Disconnect |
 | `:LobsStatus` | Show connection info |
-| `:LobsAuth` | Re-authenticate (CF Access) |
-| `:LobsAuth clear` | Clear cached auth token |
-| `:LobsAuth status` | Check if token is valid |
+| `:LobsAuth` | Force re-authenticate |
+| `:LobsAuth clear` | Clear cached token |
 
 ## How it works
 
-lobs-vim opens a WebSocket to lobs-core. When the AI agent needs to read files, run commands, or edit code, those tools execute **locally in your Neovim** — not on the server. The server handles LLM reasoning; your editor handles execution. This means the agent works with your actual project files, respects your local environment, and changes appear in your editor in real-time.
+lobs-vim opens a WebSocket to lobs-core. When the AI agent needs to read files, run commands, or edit code, those tools execute **locally in your Neovim** — not on the server. The server handles LLM reasoning; your editor handles execution.
+
+### Auth flow
+
+No secrets in your config. Authentication uses `cloudflared` (Cloudflare's CLI):
+
+1. `:LobsConnect` → `cloudflared` checks for a cached token
+2. If no token, opens your browser → Cloudflare Access login (email code)
+3. Token cached locally (~24h), auto-refreshes when expired
+4. All automatic after first login
 
 ## License
 

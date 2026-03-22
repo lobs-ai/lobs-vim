@@ -9,14 +9,10 @@ M.defaults = {
   -- Server URL (WebSocket). Use wss:// for remote/Cloudflare Access.
   server = "ws://localhost:9420",
 
-  -- Cloudflare Access settings (for remote servers behind CF Access).
-  -- Set `server` to your tunnel URL and these handle auth automatically.
+  -- Cloudflare Access (auto-detected from server URL, no secrets needed).
+  -- Auth uses `cloudflared` CLI with browser-based login.
   cloudflare = {
-    -- Enable Cloudflare Access auth. Auto-detected from wss://*.lobslab.com
-    enabled = nil, ---@type boolean|nil nil = auto-detect
-    -- The Access-protected URL to authenticate against.
-    -- Defaults to the HTTP version of `server`.
-    url = nil, ---@type string|nil
+    enabled = nil, ---@type boolean|nil nil = auto-detect from URL
   },
 
   -- UI
