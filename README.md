@@ -8,7 +8,7 @@ AI coding agent for Neovim. Connects to [lobs-core](https://github.com/lobs-ai/l
 
 ```lua
 return {
-  "lobs-ai/lobs-vim",
+  url = "git@github.com:lobs-ai/lobs-vim",
   opts = {
     server = "wss://nexus.lobslab.com",
   },
@@ -21,7 +21,7 @@ That's it. On first connect it'll open your browser for Cloudflare Access login 
 
 ```lua
 return {
-  "lobs-ai/lobs-vim",
+  url = "git@github.com:lobs-ai/lobs-vim",
   opts = {
     server = "ws://localhost:9420",
   },
@@ -40,7 +40,7 @@ All options with defaults:
 
 ```lua
 return {
-  "lobs-ai/lobs-vim",
+  url = "git@github.com:lobs-ai/lobs-vim",
   opts = {
     -- Server URL
     server = "ws://localhost:9420",

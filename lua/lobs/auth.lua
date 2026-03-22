@@ -9,8 +9,9 @@ local TOKEN_FILE = CACHE_DIR .. "/cf_token"
 ---@param config table
 ---@return string
 local function get_access_url(config)
-  if config.cloudflare.url then
-    return config.cloudflare.url
+  local cf = config.cloudflare or {}
+  if cf.url then
+    return cf.url
   end
   -- Convert ws(s)://host/path → https://host
   local url = config.server:gsub("^wss://", "https://"):gsub("^ws://", "http://")
@@ -102,7 +103,8 @@ end
 ---@param config table
 ---@param callback fun(token: string|nil, err: string|nil)
 function M.get_token(config, callback)
-  if not config.cloudflare.enabled then
+  local cf = config.cloudflare or {}
+  if not cf.enabled then
     callback(nil, nil) -- No auth needed
     return
   end
