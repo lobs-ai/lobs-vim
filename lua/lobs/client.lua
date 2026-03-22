@@ -417,15 +417,11 @@ function M:_handle_tool_request(msg)
   local request_id = msg.id
   local tool_use_id = msg.toolUseId
 
-  if self._handlers.on_tool_start then
-    self._handlers.on_tool_start(tool_name, tool_input)
-  end
+  -- Don't fire on_tool_start/on_tool_result here — the server sends
+  -- chat.status events (tool_running/tool_done) which already handle
+  -- UI updates. Firing both causes duplicate tool entries in the chat.
 
   self._tool_executor:execute(tool_name, tool_input, function(result, is_error)
-    if self._handlers.on_tool_result then
-      self._handlers.on_tool_result(tool_name, result, is_error)
-    end
-
     self:_send(protocol.tool_result({
       id = request_id,
       toolUseId = tool_use_id,

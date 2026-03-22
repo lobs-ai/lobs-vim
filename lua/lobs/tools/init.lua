@@ -51,15 +51,13 @@ end
 --- Tool handlers table
 M._handlers = {}
 
---- Which tools involve file paths that need sandboxing
+--- Which tools involve file paths that need sandboxing (write operations only)
 M._file_tools = {
-  read = true,
   write = true,
   edit = true,
-  ls = true,
 }
 
---- Validate a path is within the project root
+--- Validate a path is within the project root (only for write operations)
 ---@param path string
 ---@return boolean, string|nil
 function M:_validate_path(path)
@@ -224,19 +222,82 @@ M._handlers.exec = function(self, input, callback)
   end)
 end
 
--- ls tool
+-- ls tool — output format matches server: "type size name"
 M._handlers.ls = function(self, input, callback)
   local path = input.path and self:_resolve_path(input.path) or self._project_root
+  local limit = input.limit
 
-  vim.system(
-    { "ls", "-la", path },
-    { text = true },
-    function(result)
-      vim.schedule(function()
-        callback(result.stdout or "", result.code ~= 0)
-      end)
+  local ok, result = pcall(function()
+    local handle = vim.loop.fs_scandir(path)
+    if not handle then
+      error("Cannot list directory: " .. path)
     end
-  )
+
+    local entries = {}
+    while true do
+      local name, type = vim.loop.fs_scandir_next(handle)
+      if not name then break end
+      table.insert(entries, { name = name, type = type or "file" })
+    end
+
+    -- Sort: directories first, then alphabetical
+    table.sort(entries, function(a, b)
+      local a_dir = a.type == "directory" and 0 or 1
+      local b_dir = b.type == "directory" and 0 or 1
+      if a_dir ~= b_dir then return a_dir < b_dir end
+      return a.name < b.name
+    end)
+
+    if limit and limit > 0 then
+      local trimmed = {}
+      for i = 1, math.min(limit, #entries) do
+        trimmed[i] = entries[i]
+      end
+      entries = trimmed
+    end
+
+    local lines = {}
+    for _, entry in ipairs(entries) do
+      local full = path .. "/" .. entry.name
+      local stat = vim.loop.fs_stat(full)
+      local type_char = "f"
+      local size = "-"
+
+      if entry.type == "directory" then
+        type_char = "d"
+        size = "-"
+      elseif entry.type == "link" then
+        type_char = "l"
+        size = stat and tostring(stat.size) or "?"
+      else
+        type_char = "f"
+        if stat then
+          local s = stat.size
+          if s < 1024 then
+            size = tostring(s)
+          elseif s < 1024 * 1024 then
+            size = string.format("%.1fK", s / 1024)
+          else
+            size = string.format("%.1fM", s / (1024 * 1024))
+          end
+        end
+      end
+
+      local display = entry.type == "directory" and (entry.name .. "/") or entry.name
+      table.insert(lines, string.format("%s %8s %s", type_char, size, display))
+    end
+
+    if #lines == 0 then
+      return "(empty directory)"
+    end
+    return table.concat(lines, "\n")
+  end)
+
+  if ok then
+    callback(result, false)
+  else
+    callback("Error: " .. tostring(result), true)
+  end
 end
 
 -- grep tool
