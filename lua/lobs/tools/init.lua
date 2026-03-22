@@ -45,7 +45,16 @@ function M:execute(tool_name, input, callback)
     end
   end
 
-  handler(self, input, callback)
+  -- Wrap callback to guarantee non-empty content on errors
+  -- (Anthropic API rejects empty content with is_error=true)
+  local safe_callback = function(result, is_error)
+    if is_error and (not result or result == "") then
+      result = "Tool error (no output)"
+    end
+    callback(result or "", is_error)
+  end
+
+  handler(self, input, safe_callback)
 end
 
 --- Tool handlers table
