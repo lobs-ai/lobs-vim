@@ -61,4 +61,15 @@ function M.diff_resolve(opts)
   }
 end
 
+--- Build a session.history request message
+---@param opts table { sessionKey: string }
+---@return table
+function M.session_history(opts)
+  return {
+    type = "session.history",
+    id = next_id(),
+    sessionKey = opts.sessionKey,
+  }
+end
+
 return M

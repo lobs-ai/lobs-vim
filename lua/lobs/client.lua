@@ -6,6 +6,7 @@ M.__index = M
 
 local protocol = require("lobs.protocol")
 local auth = require("lobs.auth")
+local sessions = require("lobs.sessions")
 
 --- Create a new client
 ---@param config table
@@ -25,6 +26,14 @@ function M.new(config)
   self._outgoing_queue = {}
   self._intentional_disconnect = false
   self._cf_token = nil
+  -- Session persistence
+  self._resumed_session = false
+  -- Response tracking for disconnect handling
+  self._waiting_for_response = false
+  self._last_data_time = nil
+  self._stall_timer = nil
+  -- History handler callback (registered by chat UI)
+  self._history_handler = nil
   return self
 end
 
@@ -42,6 +51,16 @@ function M:connect(callback)
 
   self._connecting = true
   self._intentional_disconnect = false
+
+  -- Try to resume an existing session for this project
+  if not self.session_key then
+    local project_root = require("lobs.context").get_project_root()
+    local existing_key = sessions.get_session_for_project(project_root)
+    if existing_key then
+      self.session_key = existing_key
+      self._resumed_session = true
+    end
+  end
 
   -- Get CF Access token (no-op if not using Cloudflare)
   auth.get_token(self.config, function(token, err)
@@ -144,6 +163,9 @@ function M:_connect_ws(callback)
         self._connecting = false
         self._ws_job = nil
 
+        -- Stop stall timer on disconnect
+        self:_stop_stall_timer()
+
         if self._intentional_disconnect then return end
 
         if not was_connected then
@@ -152,6 +174,15 @@ function M:_connect_ws(callback)
           if stderr:match("302") or stderr:match("[Rr]edirect") then
             vim.notify("Lobs: Auth expired — run :LobsAuth", vim.log.levels.WARN)
             return -- don't reconnect on auth failure
+          end
+        end
+
+        -- If we were waiting for a response, show pending message
+        if self._waiting_for_response then
+          vim.notify("Lobs: Disconnected — response pending on server. Will resume on reconnect.", vim.log.levels.WARN)
+          -- Notify handlers about the disconnect-while-waiting state
+          if self._handlers.on_disconnect_pending then
+            self._handlers.on_disconnect_pending()
           end
         end
 
@@ -190,6 +221,8 @@ end
 --- Stop any current stream
 function M:stop_stream()
   self._handlers = {}
+  self._waiting_for_response = false
+  self:_stop_stall_timer()
 end
 
 --- Send a chat message
@@ -198,9 +231,14 @@ end
 ---@param handlers table
 function M:send_message(content, context, handlers)
   self._handlers = handlers
+  self._waiting_for_response = true
+  self._last_data_time = os.time()
+  self:_start_stall_timer()
 
   self:connect(function(err)
     if err then
+      self._waiting_for_response = false
+      self:_stop_stall_timer()
       if handlers.on_error then handlers.on_error(err) end
       return
     end
@@ -213,23 +251,88 @@ function M:send_message(content, context, handlers)
   end)
 end
 
+--- Register a handler for session history responses
+---@param handler function(messages: table[])
+function M:on_history(handler)
+  self._history_handler = handler
+end
+
+--- Request session history from the server
+function M:request_history()
+  if self.session_key and self._connected then
+    self:_send(protocol.session_history({
+      sessionKey = self.session_key,
+    }))
+  end
+end
+
+--- Start a timer that fires if no data is received for 30s while streaming
+function M:_start_stall_timer()
+  self:_stop_stall_timer()
+  self._stall_timer = vim.defer_fn(function()
+    if self._waiting_for_response then
+      self._last_data_time = self._last_data_time or os.time()
+      local elapsed = os.time() - self._last_data_time
+      if elapsed >= 30 and self._handlers.on_stall then
+        self._handlers.on_stall(elapsed)
+      end
+      -- Re-arm the timer
+      self:_start_stall_timer()
+    end
+  end, 30000)
+end
+
+--- Stop the stall timer
+function M:_stop_stall_timer()
+  if self._stall_timer then
+    pcall(function()
+      if type(self._stall_timer) == "userdata" then
+        self._stall_timer:stop()
+      end
+    end)
+    self._stall_timer = nil
+  end
+end
+
 --- Handle an incoming WebSocket message
 ---@param raw string JSON string
 function M:_on_message(raw)
   local ok, msg = pcall(vim.fn.json_decode, raw)
   if not ok or not msg or not msg.type then return end
 
+  -- Update last data time for stall detection
+  self._last_data_time = os.time()
+
   local t = msg.type
 
   if t == "session.opened" then
+    local old_key = self.session_key
     self.session_key = msg.sessionKey
-    vim.notify("Lobs: connected", vim.log.levels.INFO)
+
+    -- Persist the session
+    local project_root = require("lobs.context").get_project_root()
+    sessions.save_session(msg.sessionKey, project_root, msg.title)
+
+    if self._resumed_session and old_key == msg.sessionKey then
+      vim.notify("Lobs: reconnected (session resumed)", vim.log.levels.INFO)
+      -- Request history to populate the chat UI
+      self:request_history()
+    else
+      vim.notify("Lobs: connected (new session)", vim.log.levels.INFO)
+      self._resumed_session = false
+    end
 
     -- Flush queued messages
     for _, queued in ipairs(self._outgoing_queue) do
       self:_send_raw(queued)
     end
     self._outgoing_queue = {}
+
+  elseif t == "session.history" then
+    -- Server responded with message history
+    if self._history_handler and msg.messages then
+      self._history_handler(msg.messages)
+    end
 
   elseif t == "chat.delta" then
     if self._handlers.on_text then
@@ -244,10 +347,18 @@ function M:_on_message(raw)
       self._handlers.on_tool_start(msg.toolName, msg.toolInput)
     elseif status == "tool_done" and self._handlers.on_tool_result then
       self._handlers.on_tool_result(msg.toolName, msg.result, msg.isError)
-    elseif status == "done" and self._handlers.on_done then
-      self._handlers.on_done()
-    elseif status == "error" and self._handlers.on_error then
-      self._handlers.on_error(msg.error or "unknown error")
+    elseif status == "done" then
+      self._waiting_for_response = false
+      self:_stop_stall_timer()
+      if self._handlers.on_done then
+        self._handlers.on_done()
+      end
+    elseif status == "error" then
+      self._waiting_for_response = false
+      self:_stop_stall_timer()
+      if self._handlers.on_error then
+        self._handlers.on_error(msg.error or "unknown error")
+      end
     elseif status == "queued" and self._handlers.on_thinking then
       self._handlers.on_thinking()
     end
@@ -336,6 +447,8 @@ function M:disconnect()
     self._reconnect_timer = nil
   end
 
+  self:_stop_stall_timer()
+
   if self._ws_job then
     pcall(function() self._ws_job:kill("SIGTERM") end)
     self._ws_job = nil
@@ -344,6 +457,7 @@ function M:disconnect()
   self._connected = false
   self._connecting = false
   self._reconnect_attempts = 0
+  self._waiting_for_response = false
   vim.notify("Lobs: disconnected", vim.log.levels.INFO)
 end
 
@@ -360,14 +474,24 @@ function M:status()
     server = self.config.server,
     session = self.session_key,
     auth = self._cf_token and "authenticated" or "none",
+    resumed = self._resumed_session,
+    waiting = self._waiting_for_response,
   }
 end
 
---- Reset session
+--- Reset session (starts a new session, clears project mapping)
 function M:reset_session()
+  -- Clear the project mapping so a new session is created
+  local project_root = require("lobs.context").get_project_root()
+  sessions.clear_project_mapping(project_root)
+
   self.session_key = nil
+  self._resumed_session = false
+  self._waiting_for_response = false
+  self:_stop_stall_timer()
+
   self:_send(protocol.session_open({
-    projectRoot = require("lobs.context").get_project_root(),
+    projectRoot = project_root,
   }))
 end
 

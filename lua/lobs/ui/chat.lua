@@ -14,6 +14,8 @@ M.__index = M
 ---@field _visible boolean
 ---@field _messages table[]
 ---@field _streaming boolean
+---@field _disconnect_pending boolean
+---@field _loading_history boolean
 
 --- Create a new chat UI
 ---@param config table
@@ -28,6 +30,9 @@ function M.new(config)
   self._messages = {}
   self._streaming = false
   self._current_stream = ""
+  self._disconnect_pending = false
+  self._loading_history = false
+  self._history_registered = false
   return self
 end
 
@@ -70,11 +75,54 @@ function M:open()
   -- Create input buffer at the bottom
   self:_create_input_area()
 
+  -- Register history handler on the client
+  self:_register_history_handler()
+
   -- Render existing messages
   self:_render()
 
   -- Set up keymaps in chat buffer
   self:_setup_keymaps()
+end
+
+--- Register the history handler on the client (once)
+function M:_register_history_handler()
+  if self._history_registered then return end
+  self._history_registered = true
+
+  local client = require("lobs").client()
+  client:on_history(function(messages)
+    vim.schedule(function()
+      self._loading_history = false
+
+      if not messages or #messages == 0 then
+        self:_render()
+        return
+      end
+
+      -- Populate _messages from history, but only if we don't already have messages
+      -- (avoid duplicating if the user has been chatting)
+      if #self._messages == 0 then
+        self._messages = {}
+        for _, msg in ipairs(messages) do
+          table.insert(self._messages, {
+            role = msg.role,
+            content = msg.content or "",
+            timestamp = msg.timestamp,
+            tools = nil,
+            from_history = true,
+          })
+        end
+      end
+
+      -- If we were in a disconnect-pending state, clear it
+      if self._disconnect_pending then
+        self._disconnect_pending = false
+      end
+
+      self:_render()
+    end)
+  end)
 end
 
 --- Close the sidebar
@@ -167,6 +215,9 @@ function M:send()
   -- Clear input
   vim.api.nvim_buf_set_lines(self.input_buf, 0, -1, false, {})
 
+  -- Clear disconnect-pending state when sending new message
+  self._disconnect_pending = false
+
   -- Add user message
   self:_add_message("user", content)
 
@@ -189,12 +240,14 @@ end
 --- Start a new session
 function M:new_session()
   local client = require("lobs").client()
-  client.session_key = nil
+  client:reset_session()
   client:stop_stream()
 
   self._messages = {}
   self._streaming = false
   self._current_stream = ""
+  self._disconnect_pending = false
+  self._loading_history = false
 
   self:_render()
   vim.notify("Started new Lobs session", vim.log.levels.INFO)
@@ -260,13 +313,35 @@ function M:_send_to_agent(content, context)
     on_done = function()
       self._streaming = false
       self._current_stream = ""
+      self._disconnect_pending = false
       self:_render()
+
+      -- Update session timestamp
+      local sess_client = require("lobs").client()
+      if sess_client.session_key then
+        require("lobs.sessions").update_last_used(sess_client.session_key)
+      end
     end,
 
     on_error = function(err)
       self._streaming = false
       self._messages[msg_idx].content = "❌ Error: " .. (err or "unknown")
+      self._messages[msg_idx].is_error = true
       self:_render()
+    end,
+
+    on_disconnect_pending = function()
+      self._disconnect_pending = true
+      -- Don't clear streaming — we want to show the pending state
+      self:_render()
+    end,
+
+    on_stall = function(elapsed)
+      -- Show stall indicator without clearing the stream
+      if self._streaming and self._messages[msg_idx] then
+        -- Append a stall notice (will be replaced by next text delta)
+        self:_render()
+      end
     end,
   })
 end
@@ -293,10 +368,34 @@ function M:_render()
   local lines = {}
   local hl_ranges = {} -- { line, col_start, col_end, hl_group }
 
+  -- Session info header
+  local client = require("lobs").client()
+  if client.session_key then
+    local session_label = "📎 " .. client.session_key
+    if client._resumed_session then
+      session_label = session_label .. " (resumed)"
+    end
+    table.insert(lines, session_label)
+    table.insert(hl_ranges, { #lines, 0, #session_label, "Comment" })
+    table.insert(lines, "")
+  end
+
+  -- Loading history indicator
+  if self._loading_history then
+    table.insert(lines, "  ⏳ Loading history...")
+    table.insert(hl_ranges, { #lines, 0, -1, "Comment" })
+    table.insert(lines, "")
+  end
+
   for _, msg in ipairs(self._messages) do
     -- Role header
     local role_label = msg.role == "user" and "  You" or "  Lobs"
     local role_hl = msg.role == "user" and "LobsUser" or "LobsAssistant"
+
+    -- Add history marker for old messages
+    if msg.from_history then
+      role_label = role_label .. " (history)"
+    end
 
     table.insert(lines, role_label)
     table.insert(hl_ranges, { #lines, 0, #role_label, role_hl })
@@ -315,8 +414,16 @@ function M:_render()
 
     -- Content
     if msg.content and msg.content ~= "" then
-      for _, line in ipairs(vim.split(msg.content, "\n")) do
-        table.insert(lines, "  " .. line)
+      -- Error messages get special treatment
+      if msg.is_error then
+        for _, line in ipairs(vim.split(msg.content, "\n")) do
+          table.insert(lines, "  " .. line)
+          table.insert(hl_ranges, { #lines, 0, -1, "ErrorMsg" })
+        end
+      else
+        for _, line in ipairs(vim.split(msg.content, "\n")) do
+          table.insert(lines, "  " .. line)
+        end
       end
     end
 
@@ -324,9 +431,25 @@ function M:_render()
     table.insert(lines, "")
   end
 
-  -- Streaming indicator
-  if self._streaming then
-    table.insert(lines, "  ⏳ Lobs is typing...")
+  -- Status indicators
+  if self._disconnect_pending then
+    table.insert(lines, "  ⏳ Disconnected — response pending on server...")
+    table.insert(hl_ranges, { #lines, 0, -1, "WarningMsg" })
+    table.insert(lines, "  Will resume when reconnected.")
+    table.insert(hl_ranges, { #lines, 0, -1, "Comment" })
+  elseif self._streaming then
+    local client_ref = require("lobs").client()
+    if client_ref._waiting_for_response and client_ref._last_data_time then
+      local elapsed = os.time() - client_ref._last_data_time
+      if elapsed >= 30 then
+        table.insert(lines, string.format("  ⏳ Still waiting... (%ds)", elapsed))
+        table.insert(hl_ranges, { #lines, 0, -1, "WarningMsg" })
+      else
+        table.insert(lines, "  ⏳ Lobs is typing...")
+      end
+    else
+      table.insert(lines, "  ⏳ Lobs is typing...")
+    end
   end
 
   vim.api.nvim_buf_set_lines(self.chat_buf, 0, -1, false, lines)
