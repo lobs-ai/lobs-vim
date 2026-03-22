@@ -1,159 +1,149 @@
 -- lobs.nvim — Cloudflare Access authentication
--- Uses `cloudflared access tcp` to create a local proxy that handles
--- all CF Access auth automatically (browser login on first use).
+-- Uses `cloudflared` CLI for browser-based login. No secrets in config.
 --
 -- Flow:
---   1. Start `cloudflared access tcp` proxy on a random local port
---   2. If no token cached, cloudflared opens browser for login
---   3. Proxy handles auth transparently — websocat connects to localhost
---   4. Token cached by cloudflared (~24h), auto-refreshes
+--   1. First connect: `cloudflared access login <url>` opens browser
+--   2. User authenticates via email code (one click)
+--   3. JWT cached locally by cloudflared
+--   4. Token sent as CF_Authorization cookie on WebSocket upgrade
+--   5. On expiry, browser opens again automatically
 local M = {}
 
----@class CfProxy
----@field port number Local port the proxy listens on
----@field process vim.SystemObj|nil
----@field ready boolean
-
----@type CfProxy|nil
-M._proxy = nil
-
---- Find a free port by binding to 0 and reading back the port
----@return number
-local function find_free_port()
-  -- Use a random high port; cloudflared will error if it's taken
-  -- and we can retry. This avoids needing luasocket.
-  return 49152 + math.random(0, 16383)
+--- Get the Access URL from config (HTTPS version of the server URL)
+---@param config table
+---@return string
+local function get_access_url(config)
+  local cf = config.cloudflare or {}
+  if cf.url then return cf.url end
+  -- Convert ws(s)://host → https://host (strip path)
+  local url = config.server:gsub("^wss://", "https://"):gsub("^ws://", "http://")
+  return url:match("^https?://[^/]+") or url
 end
 
---- Start the cloudflared access proxy for the given hostname.
---- Calls callback(port, err) when the proxy is ready or failed.
+--- Check if a string looks like a JWT (three base64url segments)
+---@param s string
+---@return boolean
+local function looks_like_jwt(s)
+  return s:match("^[A-Za-z0-9_%-]+%.[A-Za-z0-9_%-]+%.[A-Za-z0-9_%-]+$") ~= nil
+end
+
+--- Extract a JWT from cloudflared output (may contain error text too)
+---@param stdout string
+---@return string|nil
+local function extract_token(stdout)
+  if not stdout then return nil end
+  for line in stdout:gmatch("[^\r\n]+") do
+    local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if looks_like_jwt(trimmed) then
+      return trimmed
+    end
+  end
+  return nil
+end
+
+--- Get a valid CF Access token. Async — calls callback(token, err).
 ---@param config table
----@param callback fun(port: number|nil, err: string|nil)
-function M.ensure_proxy(config, callback)
+---@param callback fun(token: string|nil, err: string|nil)
+function M.get_token(config, callback)
   local cf = config.cloudflare or {}
   if not cf.enabled then
     callback(nil, nil)
     return
   end
 
-  -- Already running?
-  if M._proxy and M._proxy.process and M._proxy.ready then
-    callback(M._proxy.port, nil)
-    return
-  end
-
-  -- Kill existing proxy if it's in a bad state
-  M.stop_proxy()
-
   if vim.fn.executable("cloudflared") ~= 1 then
     callback(nil, "cloudflared not found. Install: brew install cloudflared")
     return
   end
 
-  -- Extract hostname from server URL
-  local hostname = config.server:match("wss?://([^/:]+)")
-  if not hostname then
-    callback(nil, "Can't extract hostname from: " .. config.server)
-    return
-  end
+  local url = get_access_url(config)
 
-  local port = find_free_port()
-  local listener = "localhost:" .. port
-
-  vim.notify("Lobs: Starting auth proxy...", vim.log.levels.INFO)
-
-  local ready = false
-  local proxy = {
-    port = port,
-    process = nil,
-    ready = false,
-  }
-
-  proxy.process = vim.system(
-    {
-      "cloudflared", "access", "tcp",
-      "--hostname", hostname,
-      "--url", listener,
-      "--log-level", "error",
-    },
-    {
-      text = true,
-      stderr = function(_, data)
-        if not data or data == "" then return end
-        vim.schedule(function()
-          local trimmed = data:gsub("%s+$", "")
-          -- cloudflared prints connection info to stderr
-          if trimmed ~= "" then
-            -- If it mentions "failed" or "error", notify
-            if trimmed:lower():match("failed") or trimmed:lower():match("error") then
-              vim.notify("Lobs auth: " .. trimmed, vim.log.levels.ERROR)
-            end
-          end
-        end)
-      end,
-    },
-    function(_result)
-      -- Process exited
+  -- Try non-interactive token fetch first (works if previously logged in)
+  vim.system(
+    { "cloudflared", "access", "token", url },
+    { text = true },
+    function(result)
       vim.schedule(function()
-        if M._proxy == proxy then
-          M._proxy = nil
+        local token = extract_token(result.stdout or "")
+        if token then
+          callback(token, nil)
+        else
+          -- No cached token — need interactive login
+          M._interactive_login(url, callback)
         end
       end)
     end
   )
+end
 
-  M._proxy = proxy
+--- Run interactive cloudflared login (opens browser)
+---@param url string
+---@param callback fun(token: string|nil, err: string|nil)
+function M._interactive_login(url, callback)
+  vim.notify("Lobs: Opening browser for authentication...", vim.log.levels.INFO)
 
-  -- cloudflared takes a moment to start listening.
-  -- Poll the port until it's accepting connections or timeout.
-  local attempts = 0
-  local max_attempts = 30 -- 3 seconds
-  local function check_ready()
-    attempts = attempts + 1
-    -- Try connecting to the port
-    vim.system(
-      { "bash", "-c", string.format("echo | nc -w 1 localhost %d 2>/dev/null", port) },
-      { text = true },
-      function(result)
-        vim.schedule(function()
-          if result.code == 0 then
-            proxy.ready = true
-            ready = true
-            vim.notify("Lobs: Connected through Cloudflare Access", vim.log.levels.INFO)
-            callback(port, nil)
-          elseif attempts >= max_attempts then
-            M.stop_proxy()
-            callback(nil, "Auth proxy failed to start (timeout). Run: cloudflared access login https://" .. hostname)
-          else
-            vim.defer_fn(check_ready, 100)
+  vim.system(
+    { "cloudflared", "access", "login", "--auto-close", url },
+    { text = true },
+    function(result)
+      vim.schedule(function()
+        if result.code ~= 0 then
+          local err = (result.stderr or ""):gsub("%s+$", "")
+          if err == "" then err = "login failed" end
+          callback(nil, "Auth failed: " .. err)
+          return
+        end
+
+        -- Login succeeded — fetch the token
+        vim.system(
+          { "cloudflared", "access", "token", url },
+          { text = true },
+          function(token_result)
+            vim.schedule(function()
+              local token = extract_token(token_result.stdout or "")
+              if token then
+                callback(token, nil)
+              else
+                callback(nil, "Login succeeded but couldn't retrieve token")
+              end
+            end)
           end
-        end)
-      end
-    )
-  end
-
-  -- Give cloudflared a moment to start before first check
-  vim.defer_fn(check_ready, 200)
+        )
+      end)
+    end
+  )
 end
 
---- Stop the cloudflared proxy
-function M.stop_proxy()
-  if M._proxy and M._proxy.process then
-    pcall(function() M._proxy.process:kill("SIGTERM") end)
+--- Check if we can get a token without user interaction
+---@param config table
+---@param callback fun(ok: boolean)
+function M.check_status(config, callback)
+  local cf = config.cloudflare or {}
+  if not cf.enabled then
+    callback(true)
+    return
   end
-  M._proxy = nil
+  if vim.fn.executable("cloudflared") ~= 1 then
+    callback(false)
+    return
+  end
+  local url = get_access_url(config)
+  vim.system(
+    { "cloudflared", "access", "token", url },
+    { text = true },
+    function(result)
+      vim.schedule(function()
+        callback(extract_token(result.stdout or "") ~= nil)
+      end)
+    end
+  )
 end
 
---- Clear auth (stop proxy, next connect will re-auth)
+--- Clear cloudflared's cached token
 function M.clear_cache()
-  M.stop_proxy()
-  vim.notify("Lobs: Auth cleared — will re-authenticate on next connect", vim.log.levels.INFO)
-end
-
---- Check if auth proxy is running
----@return boolean
-function M.is_authenticated()
-  return M._proxy ~= nil and M._proxy.ready
+  -- cloudflared stores tokens in ~/.cloudflared/
+  -- We can't easily clear just one, but re-login will overwrite
+  vim.notify("Lobs: Next connect will re-authenticate", vim.log.levels.INFO)
 end
 
 return M
