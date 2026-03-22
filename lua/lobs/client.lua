@@ -193,10 +193,19 @@ function M:_connect_ws(callback)
     end
   )
 
+  -- Build project context for new sessions (README, AGENTS.md, pwd, etc.)
+  local ctx = require("lobs.context")
+  local project_root = ctx.get_project_root()
+  local project_context = nil
+  if not self._resumed_session then
+    project_context = ctx.build_project_context()
+  end
+
   -- Send session.open immediately
   self:_send_raw(protocol.session_open({
-    projectRoot = require("lobs.context").get_project_root(),
+    projectRoot = project_root,
     sessionKey = self.session_key,
+    projectContext = project_context,
   }))
 
   if callback then callback(nil) end

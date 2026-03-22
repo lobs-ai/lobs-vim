@@ -12,7 +12,7 @@ local function next_id()
 end
 
 --- Build a session.open message
----@param opts table { projectRoot: string, sessionKey?: string }
+---@param opts table { projectRoot: string, sessionKey?: string, projectContext?: string }
 ---@return table
 function M.session_open(opts)
   return {
@@ -20,6 +20,7 @@ function M.session_open(opts)
     id = next_id(),
     projectRoot = opts.projectRoot,
     sessionKey = opts.sessionKey,
+    projectContext = opts.projectContext,
   }
 end
 
