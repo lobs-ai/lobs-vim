@@ -14,19 +14,30 @@ function M.new()
   return self
 end
 
+-- Map server tool names (PascalCase) to our handler keys (lowercase)
+M._tool_aliases = {
+  Read = "read",
+  Write = "write",
+  Edit = "edit",
+  Grep = "grep",
+  Glob = "glob",
+}
+
 --- Dispatch to the right tool handler
 ---@param tool_name string
 ---@param input table
 ---@param callback function(result: string, is_error: boolean)
 function M:execute(tool_name, input, callback)
-  local handler = self._handlers[tool_name]
+  -- Normalize: server may send "Read" but our handlers are keyed "read"
+  local key = self._tool_aliases[tool_name] or tool_name:lower()
+  local handler = self._handlers[key]
   if not handler then
     callback("Unknown tool: " .. tool_name, true)
     return
   end
 
   -- Validate paths are within project root (for file tools)
-  if self._file_tools[tool_name] and input.path then
+  if self._file_tools[key] and input.path then
     local ok, err = self:_validate_path(input.path)
     if not ok then
       callback("Path access denied: " .. err, true)

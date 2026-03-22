@@ -1,0 +1,121 @@
+*lobs.txt*    AI coding agent for Neovim via lobs-core
+
+Author:  Rafe Symonds / thelobsbot
+License: MIT
+
+==============================================================================
+CONTENTS                                                    *lobs-contents*
+
+1. Introduction ..................................... |lobs-introduction|
+2. Requirements ..................................... |lobs-requirements|
+3. Setup ............................................ |lobs-setup|
+4. Commands ......................................... |lobs-commands|
+5. Keymaps .......................................... |lobs-keymaps|
+6. Configuration .................................... |lobs-config|
+7. Architecture ..................................... |lobs-architecture|
+
+==============================================================================
+1. INTRODUCTION                                          *lobs-introduction*
+
+lobs.nvim connects Neovim to your lobs-core AI agent via WebSocket. Think
+Cursor's agent mode, but backed by your own infrastructure.
+
+The agent can:
+- Read, write, and edit files in your project
+- Run shell commands
+- Search code with ripgrep/fd
+- Use web search and memory
+- Stream responses with tool call visibility
+
+File operations run locally in Neovim (your filesystem, your buffers).
+Reasoning and orchestration happen on the lobs-core server.
+
+==============================================================================
+2. REQUIREMENTS                                          *lobs-requirements*
+
+- Neovim >= 0.10.0
+- lobs-core running (default: localhost:9420)
+- websocat (brew install websocat)
+- nui.nvim (UI components)
+- Optional: rg (ripgrep), fd for code search tools
+
+==============================================================================
+3. SETUP                                                      *lobs-setup*
+
+Using lazy.nvim: >lua
+
+  {
+    "lobs-ai/lobs-vim",
+    dependencies = { "MunifTanjim/nui.nvim" },
+    opts = {
+      server = "ws://localhost:9420",
+    },
+  }
+<
+==============================================================================
+4. COMMANDS                                                *lobs-commands*
+
+*:LobsToggle*       Toggle the chat sidebar
+*:LobsChat*         Open chat sidebar and focus input
+*:LobsSend*         Send current input to the agent
+*:LobsAsk*          Ask about visual selection (visual mode)
+*:LobsNewSession*   Start a fresh chat session
+*:LobsStatus*       Show connection status
+
+==============================================================================
+5. KEYMAPS                                                  *lobs-keymaps*
+
+Default keymaps (configurable via opts.keymaps):
+
+  <leader>aa    Toggle chat sidebar
+  <leader>ac    New chat session
+  <leader>as    Ask about visual selection (visual mode)
+
+In the input buffer:
+  <CR>          Send message (normal mode)
+  <C-CR>        Send message (insert mode)
+
+In the chat buffer:
+  q             Close sidebar
+
+==============================================================================
+6. CONFIGURATION                                            *lobs-config*
+
+>lua
+  require("lobs").setup({
+    server = "ws://localhost:9420",  -- lobs-core WebSocket URL
+    token = "",                      -- auth token (if needed)
+    sidebar_width = 60,              -- sidebar width in columns
+    sidebar_position = "right",      -- "left" or "right"
+    send_current_file = true,        -- include current file in context
+    send_selection = true,           -- include visual selection
+    max_context_lines = 500,         -- max lines of file context
+    keymaps = {
+      toggle = "<leader>aa",
+      new_session = "<leader>ac",
+      ask_selection = "<leader>as",
+    },
+  })
+<
+==============================================================================
+7. ARCHITECTURE                                        *lobs-architecture*
+
+lobs.nvim communicates with lobs-core via WebSocket on /api/vim/ws.
+
+  Neovim (local)              lobs-core (remote)
+  ─────────────               ──────────────────
+  Chat UI                     MainAgent
+  Tool Executor  ◄──────────► WebSocket Handler
+  Context Gather              Event Streamer
+
+Messages flow as newline-delimited JSON over WebSocket:
+
+  session.open  →   Open/resume a session
+  chat.send     →   Send user message with editor context
+  ←  chat.delta     Streaming text response
+  ←  chat.status    Tool calls, thinking, done, errors
+  ←  tool.request   Server asks client to run a tool locally
+  tool.result   →   Client sends tool result back
+
+==============================================================================
+ vim:tw=78:ts=8:ft=help:norl:
