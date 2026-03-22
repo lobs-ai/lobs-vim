@@ -210,7 +210,7 @@ end
 ---@param msg table
 function M:_handle_tool_request(msg)
   local tool_name = msg.tool
-  local tool_input = msg.input or {}
+  local tool_input = msg.args or msg.input or {}
   local request_id = msg.id
   local tool_use_id = msg.toolUseId
 
