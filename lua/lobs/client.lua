@@ -67,16 +67,31 @@ function M:_connect_ws(callback)
     return
   end
 
-  local ws_url = self.config.server:gsub("/+$", "") .. "/api/vim/ws"
-  local cmd = { "websocat", "--text" }
-
-  -- Add CF Access token as cookie header
-  if self._cf_token then
-    table.insert(cmd, "-H")
-    table.insert(cmd, "Cookie: CF_Authorization=" .. self._cf_token)
+  local server = self.config.server or ""
+  if server == "" then
+    self._connecting = false
+    local err = "No server URL configured"
+    vim.notify("Lobs: " .. err, vim.log.levels.ERROR)
+    if callback then callback(err) end
+    return
   end
 
-  table.insert(cmd, ws_url)
+  local ws_url = server:gsub("/+$", "") .. "/api/vim/ws"
+
+  -- Build websocat command
+  local cmd
+  if self._cf_token then
+    cmd = {
+      "websocat", "--text",
+      "-H", "Cookie: CF_Authorization=" .. self._cf_token,
+      ws_url,
+    }
+  else
+    cmd = { "websocat", "--text", ws_url }
+  end
+
+  -- Debug: show exactly what we're running
+  vim.notify("Lobs: cmd = " .. vim.inspect(cmd), vim.log.levels.INFO)
 
   local buf = ""
   local got_message = false

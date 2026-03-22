@@ -32,10 +32,16 @@ end
 ---@return string|nil
 local function extract_token(stdout)
   if not stdout then return nil end
+  -- cloudflared access token outputs just the JWT, possibly with whitespace
+  local trimmed = stdout:gsub("^%s+", ""):gsub("%s+$", "")
+  if looks_like_jwt(trimmed) then
+    return trimmed
+  end
+  -- If there's extra output, search line by line
   for line in stdout:gmatch("[^\r\n]+") do
-    local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
-    if looks_like_jwt(trimmed) then
-      return trimmed
+    local lt = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if looks_like_jwt(lt) then
+      return lt
     end
   end
   return nil
