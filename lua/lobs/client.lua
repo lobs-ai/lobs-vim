@@ -23,17 +23,18 @@ function M.new(config)
   self.config = config
   self.session_key = nil
   self._connected = false
+  self._connecting = false
   self._ws_job = nil
   self._pending = {}
   self._handlers = {}
-  self._base_url = config.server:gsub("^ws", "http"):gsub("/+$", "")
   self._ws_url = config.server:gsub("/+$", "") .. "/api/vim/ws"
   self._tool_executor = require("lobs.tools").new()
   self._reconnect_timer = nil
   self._reconnect_attempts = 0
-  self._max_reconnect_attempts = 10
-  self._outgoing_queue = {} -- Messages queued while disconnected
+  self._max_reconnect_attempts = 5
+  self._outgoing_queue = {}
   self._cf_token = nil
+  self._intentional_disconnect = false
   return self
 end
 
@@ -44,11 +45,19 @@ function M:connect(callback)
     if callback then callback(nil) end
     return
   end
+  if self._connecting then
+    if callback then callback("already connecting") end
+    return
+  end
+
+  self._connecting = true
+  self._intentional_disconnect = false
 
   -- Get CF Access token first (no-op if not using Cloudflare)
   auth.get_token(self.config, function(token, err)
     if err then
-      vim.notify("Lobs: auth failed — " .. err, vim.log.levels.ERROR)
+      self._connecting = false
+      vim.notify("Lobs: " .. err, vim.log.levels.ERROR)
       if callback then callback(err) end
       return
     end
@@ -60,73 +69,102 @@ end
 --- Internal: establish WebSocket connection (after auth)
 ---@param callback function|nil
 function M:_connect_ws(callback)
-  local url = self._ws_url
-
   -- Check websocat is available
   if vim.fn.executable("websocat") ~= 1 then
-    local err = "websocat not found. Install it: brew install websocat"
+    self._connecting = false
+    local err = "websocat not found. Install: brew install websocat"
     vim.notify("Lobs: " .. err, vim.log.levels.ERROR)
     if callback then callback(err) end
     return
   end
 
-  -- Build websocat command with optional CF Access header
+  -- Build websocat command
   local cmd = { "websocat", "--text" }
   if self._cf_token then
-    table.insert(cmd, "--header")
+    table.insert(cmd, "-H")
     table.insert(cmd, "Cookie: CF_Authorization=" .. self._cf_token)
   end
-  table.insert(cmd, url)
+  table.insert(cmd, self._ws_url)
 
   local buf = ""
+  local got_message = false
 
   self._ws_job = vim.system(
     cmd,
     {
       text = true,
       stdin = true,
-      stdout = function(err, data)
-        if err or not data then return end
+      stdout = function(_, data)
+        if not data then return end
         vim.schedule(function()
           buf = buf .. data
-          -- Parse newline-delimited JSON messages
           while true do
             local nl = buf:find("\n")
             if not nl then break end
             local line = buf:sub(1, nl - 1)
             buf = buf:sub(nl + 1)
             if line ~= "" then
+              -- First message confirms we're actually connected
+              if not got_message then
+                got_message = true
+                self._connected = true
+                self._connecting = false
+                self._reconnect_attempts = 0
+              end
               self:_on_message(line)
             end
           end
         end)
       end,
-      stderr = function(_err, data)
+      stderr = function(_, data)
         if data and data ~= "" then
           vim.schedule(function()
-            -- Don't spam non-critical websocat messages
-            if data:match("error") or data:match("Error") then
-              vim.notify("Lobs WS: " .. data, vim.log.levels.ERROR)
+            -- Capture stderr for connection errors
+            local trimmed = data:gsub("%s+$", "")
+            if trimmed:match("302") or trimmed:match("[Rr]edirect") then
+              vim.notify("Lobs: Server requires auth — run :LobsAuth", vim.log.levels.ERROR)
+            elseif trimmed:match("[Ee]rror") or trimmed:match("WebSocketError") then
+              -- Only show if we haven't connected yet (not mid-session noise)
+              if not self._connected then
+                vim.notify("Lobs: " .. trimmed, vim.log.levels.ERROR)
+              end
             end
           end)
         end
       end,
     },
-    function(_result)
-      -- Process exited — connection closed
+    function(result)
       vim.schedule(function()
+        local was_connected = self._connected
         self._connected = false
+        self._connecting = false
+        self._ws_job = nil
+
+        if self._intentional_disconnect then
+          return -- don't reconnect
+        end
+
+        -- If we never got a message, the connection failed entirely
+        if not was_connected then
+          -- Check if it's an auth issue
+          local stderr = result.stderr or ""
+          if stderr:match("302") or stderr:match("[Rr]edirect") then
+            -- Auth failed — clear token and prompt
+            auth.clear_cache()
+            self._cf_token = nil
+            vim.notify("Lobs: Auth required. Run :LobsConnect to authenticate.", vim.log.levels.WARN)
+            return -- don't auto-reconnect on auth failure
+          end
+        end
+
         self:_on_disconnect()
       end)
     end
   )
 
-  -- Consider connected once the process starts
-  self._connected = true
-  self._reconnect_attempts = 0
-
-  -- Send session open request
-  self:_send(protocol.session_open({
+  -- Send session.open immediately — if websocat connected, it'll go through.
+  -- If websocat fails, the message just gets lost (process dies).
+  self:_send_raw(protocol.session_open({
     projectRoot = require("lobs.context").get_project_root(),
     sessionKey = self.session_key,
   }))
@@ -134,16 +172,22 @@ function M:_connect_ws(callback)
   if callback then callback(nil) end
 end
 
---- Send a raw message over WebSocket
+--- Send a raw message over WebSocket (no queue, direct write)
+---@param msg table
+function M:_send_raw(msg)
+  if not self._ws_job then return end
+  local json_str = vim.fn.json_encode(msg) .. "\n"
+  pcall(function() self._ws_job:write(json_str) end)
+end
+
+--- Send a message, queuing if not connected
 ---@param msg table
 function M:_send(msg)
-  if not self._connected or not self._ws_job then
+  if self._connected and self._ws_job then
+    self:_send_raw(msg)
+  else
     table.insert(self._outgoing_queue, msg)
-    return
   end
-
-  local json_str = vim.fn.json_encode(msg) .. "\n"
-  self._ws_job:write(json_str)
 end
 
 --- Stop any current stream
@@ -182,11 +226,11 @@ function M:_on_message(raw)
 
   if t == "session.opened" then
     self.session_key = msg.sessionKey
-    vim.notify("Lobs: connected (" .. (msg.title or msg.sessionKey) .. ")", vim.log.levels.INFO)
+    vim.notify("Lobs: connected", vim.log.levels.INFO)
 
     -- Flush queued messages
     for _, queued in ipairs(self._outgoing_queue) do
-      self:_send(queued)
+      self:_send_raw(queued)
     end
     self._outgoing_queue = {}
 
@@ -218,11 +262,11 @@ function M:_on_message(raw)
     self:_handle_diff_propose(msg)
 
   elseif t == "error" then
-    -- Check for auth errors — might need to re-login
     local errmsg = msg.message or "server error"
-    if errmsg:match("403") or errmsg:match("Unauthorized") or errmsg:match("Access denied") then
+    if errmsg:match("403") or errmsg:match("Unauthorized") then
       auth.clear_cache()
-      vim.notify("Lobs: Auth expired. Run :LobsConnect to re-authenticate.", vim.log.levels.WARN)
+      self._cf_token = nil
+      vim.notify("Lobs: Auth expired. Run :LobsConnect", vim.log.levels.WARN)
     end
     if self._handlers.on_error then
       self._handlers.on_error(errmsg)
@@ -242,13 +286,11 @@ function M:_handle_tool_request(msg)
     self._handlers.on_tool_start(tool_name, tool_input)
   end
 
-  -- Execute the tool locally
   self._tool_executor:execute(tool_name, tool_input, function(result, is_error)
     if self._handlers.on_tool_result then
       self._handlers.on_tool_result(tool_name, result, is_error)
     end
 
-    -- Send result back to server
     self:_send(protocol.tool_result({
       id = request_id,
       toolUseId = tool_use_id,
@@ -273,7 +315,7 @@ end
 --- Handle WebSocket disconnection
 function M:_on_disconnect()
   if self._reconnect_attempts >= self._max_reconnect_attempts then
-    vim.notify("Lobs: connection lost after " .. self._max_reconnect_attempts .. " attempts", vim.log.levels.ERROR)
+    vim.notify("Lobs: disconnected — run :LobsConnect to retry", vim.log.levels.ERROR)
     return
   end
 
@@ -283,24 +325,46 @@ function M:_on_disconnect()
   vim.notify(string.format("Lobs: reconnecting in %ds...", delay / 1000), vim.log.levels.WARN)
 
   self._reconnect_timer = vim.defer_fn(function()
+    self._reconnect_timer = nil
     self:connect()
   end, delay)
 end
 
 --- Disconnect
 function M:disconnect()
+  self._intentional_disconnect = true
+
+  -- Cancel pending reconnect
+  if self._reconnect_timer then
+    -- vim.defer_fn returns a timer; stop it
+    pcall(function()
+      if type(self._reconnect_timer) == "userdata" then
+        self._reconnect_timer:stop()
+      end
+    end)
+    self._reconnect_timer = nil
+  end
+
   if self._ws_job then
-    self._ws_job:kill("SIGTERM")
+    pcall(function() self._ws_job:kill("SIGTERM") end)
     self._ws_job = nil
   end
+
   self._connected = false
-  self._reconnect_timer = nil
+  self._connecting = false
+  self._reconnect_attempts = 0
 end
 
 --- Get connection status
 function M:status()
+  local state = "disconnected"
+  if self._connected then
+    state = "connected"
+  elseif self._connecting then
+    state = "connecting"
+  end
   return {
-    state = self._connected and "connected" or "disconnected",
+    state = state,
     server = self._ws_url,
     session = self.session_key,
     auth = self._cf_token and "authenticated" or "none",
