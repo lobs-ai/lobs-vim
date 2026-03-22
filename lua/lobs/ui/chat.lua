@@ -272,7 +272,7 @@ function M:_send_to_agent(content, context)
 
   client:send_message(content, context, {
     on_thinking = function()
-      self._messages[msg_idx].content = "🤔 Thinking..."
+      -- No-op: the streaming indicator at the bottom of chat handles this
       self:_render()
     end,
 
@@ -443,17 +443,22 @@ function M:_render()
     table.insert(lines, "  Will resume when reconnected.")
     table.insert(hl_ranges, { #lines, 0, -1, "Comment" })
   elseif self._streaming then
-    local client_ref = require("lobs").client()
-    if client_ref._waiting_for_response and client_ref._last_data_time then
-      local elapsed = os.time() - client_ref._last_data_time
-      if elapsed >= 30 then
-        table.insert(lines, string.format("  ⏳ Still waiting... (%ds)", elapsed))
-        table.insert(hl_ranges, { #lines, 0, -1, "WarningMsg" })
+    -- Only show indicator if no text has streamed yet (still thinking/waiting)
+    if self._current_stream == "" then
+      local client_ref = require("lobs").client()
+      if client_ref._waiting_for_response and client_ref._last_data_time then
+        local elapsed = os.time() - client_ref._last_data_time
+        if elapsed >= 30 then
+          table.insert(lines, string.format("  ⏳ Still waiting... (%ds)", elapsed))
+          table.insert(hl_ranges, { #lines, 0, -1, "WarningMsg" })
+        else
+          table.insert(lines, "  ⏳ Thinking...")
+          table.insert(hl_ranges, { #lines, 0, -1, "Comment" })
+        end
       else
-        table.insert(lines, "  ⏳ Lobs is typing...")
+        table.insert(lines, "  ⏳ Thinking...")
+        table.insert(hl_ranges, { #lines, 0, -1, "Comment" })
       end
-    else
-      table.insert(lines, "  ⏳ Lobs is typing...")
     end
   end
 

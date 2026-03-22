@@ -137,10 +137,16 @@ function M.register()
           -- Disconnect and reconnect with the selected session
           client.session_key = selected.session_key
           client._resumed_session = true
+          client._session_title = selected.title
 
           -- Clear chat messages so history will populate them
           chat._messages = {}
+          chat._streaming = false
+          chat._current_stream = ""
           chat._loading_history = true
+
+          -- Open the chat sidebar (if not already open) so user sees the session
+          chat:open()
           chat:_render()
 
           if client._connected then
@@ -149,6 +155,8 @@ function M.register()
           client:connect(function(err)
             if err then
               vim.notify("Lobs: " .. err, vim.log.levels.ERROR)
+            else
+              chat:focus_input()
             end
           end)
         elseif action_idx == 2 then
