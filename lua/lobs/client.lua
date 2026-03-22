@@ -79,19 +79,18 @@ function M:_connect_ws(callback)
   local ws_url = server:gsub("/+$", "") .. "/api/vim/ws"
 
   -- Build websocat command
+  -- NOTE: websocat's -H flag is greedy and eats subsequent args.
+  -- Must use -H=value syntax or put -H last (before URL won't work).
   local cmd
   if self._cf_token then
     cmd = {
       "websocat", "--text",
-      "-H", "Cookie: CF_Authorization=" .. self._cf_token,
       ws_url,
+      "-H=Cookie: CF_Authorization=" .. self._cf_token,
     }
   else
     cmd = { "websocat", "--text", ws_url }
   end
-
-  -- Debug: show exactly what we're running
-  vim.notify("Lobs: cmd = " .. vim.inspect(cmd), vim.log.levels.INFO)
 
   local buf = ""
   local got_message = false
