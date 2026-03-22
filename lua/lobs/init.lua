@@ -48,6 +48,13 @@ function M.setup(opts)
     M.config.cloudflare.enabled = M.config.server:match("wss://.*%.lobslab%.com") ~= nil
   end
 
+  -- Invalidate cached client/chat so they pick up new config
+  if M._client then
+    M._client:disconnect()
+    M._client = nil
+  end
+  M._chat = nil
+
   -- Register commands
   require("lobs.commands").register()
 
@@ -59,6 +66,11 @@ end
 
 --- Get the websocket client (lazy init)
 function M.client()
+  if not M._started then
+    -- setup() hasn't been called — shouldn't happen with lazy.nvim
+    -- but guard against it
+    M.setup({})
+  end
   if not M._client then
     M._client = require("lobs.client").new(M.config)
   end
@@ -67,6 +79,9 @@ end
 
 --- Get the chat UI
 function M.chat()
+  if not M._started then
+    M.setup({})
+  end
   if not M._chat then
     M._chat = require("lobs.ui.chat").new(M.config)
   end
