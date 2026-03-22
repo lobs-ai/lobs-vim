@@ -84,6 +84,7 @@ function M:_connect_ws(callback)
     cmd,
     {
       text = true,
+      stdin = true,
       stdout = function(err, data)
         if err or not data then return end
         vim.schedule(function()
