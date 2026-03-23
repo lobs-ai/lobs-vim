@@ -10,12 +10,12 @@ AI coding agent for Neovim. Connects to [lobs-core](https://github.com/lobs-ai/l
 return {
   url = "git@github.com:lobs-ai/lobs-vim",
   opts = {
-    server = "wss://nexus.lobslab.com",
+    server = "wss://your-server.example.com",
   },
 }
 ```
 
-First time you connect, your browser opens for a quick email auth. After that it just works (token cached ~24h).
+Point `server` at your lobs-core instance. First time you connect, your browser opens for a quick email auth. After that it just works (token cached ~24h).
 
 ## Requirements
 
@@ -29,10 +29,10 @@ First time you connect, your browser opens for a quick email auth. After that it
 return {
   url = "git@github.com:lobs-ai/lobs-vim",
   opts = {
-    -- Server URL
-    server = "wss://nexus.lobslab.com",
+    -- Server URL (your lobs-core instance)
+    server = "wss://your-server.example.com",
 
-    -- Cloudflare Access (auto-detected for *.lobslab.com, no secrets needed)
+    -- Cloudflare Access (auto-detected if using CF tunnels, no secrets needed)
     cloudflare = {
       enabled = nil,  -- nil = auto-detect from URL
     },
