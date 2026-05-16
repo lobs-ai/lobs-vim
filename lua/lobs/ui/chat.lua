@@ -336,6 +336,11 @@ function M:_send_to_agent(content, context)
       self:_render()
     end,
 
+    on_resume = function()
+      self._disconnect_pending = false
+      self:_render()
+    end,
+
     on_stall = function(elapsed)
       -- Show stall indicator without clearing the stream
       if self._streaming and self._messages[msg_idx] then
@@ -438,9 +443,9 @@ function M:_render()
 
   -- Status indicators
   if self._disconnect_pending then
-    table.insert(lines, "  ⏳ Disconnected — response pending on server...")
+    table.insert(lines, "  ⏳ Disconnected — response paused on server...")
     table.insert(hl_ranges, { #lines, 0, -1, "WarningMsg" })
-    table.insert(lines, "  Will resume when reconnected.")
+    table.insert(lines, "  Reconnect, then run :LobsResume.")
     table.insert(hl_ranges, { #lines, 0, -1, "Comment" })
   elseif self._streaming then
     -- Only show indicator if no text has streamed yet (still thinking/waiting)

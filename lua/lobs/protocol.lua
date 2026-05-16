@@ -73,4 +73,15 @@ function M.session_history(opts)
   }
 end
 
+--- Build a session.resume message
+---@param opts table { sessionKey?: string }
+---@return table
+function M.session_resume(opts)
+  return {
+    type = "session.resume",
+    id = next_id(),
+    sessionKey = opts.sessionKey,
+  }
+end
+
 return M

@@ -85,6 +85,10 @@ function M.register()
     end)
   end, { desc = "Connect to Lobs server" })
 
+  cmd("LobsResume", function()
+    require("lobs").client():resume_pending()
+  end, { desc = "Resume a paused Lobs response" })
+
   cmd("LobsDisconnect", function()
     require("lobs").client():disconnect()
     vim.notify("Lobs: disconnected", vim.log.levels.INFO)
